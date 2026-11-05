@@ -22,9 +22,18 @@ DROP FUNCTION IF EXISTS sync_table_occupancy(integer) CASCADE;
 DROP FUNCTION IF EXISTS trg_reservations_occupancy() CASCADE;
 DROP FUNCTION IF EXISTS trg_reservation_tables_occupancy() CASCADE;
 DROP FUNCTION IF EXISTS set_updated_at() CASCADE;
+DROP FUNCTION IF EXISTS search_key(text);
 
 -- Índices GiST sobre enteros, para la restricción de exclusión de table_occupancy.
 CREATE EXTENSION IF NOT EXISTS btree_gist;
+-- Quitar acentos en las búsquedas por nombre.
+CREATE EXTENSION IF NOT EXISTS unaccent;
+
+-- Clave de búsqueda sin mayúsculas ni acentos: «LUCIA» encuentra «Lucía», como
+-- hacía la intercalación utf8mb4_unicode_ci de MariaDB.
+--   WHERE search_key(name) LIKE search_key(?)
+CREATE FUNCTION search_key(text) RETURNS text LANGUAGE sql STABLE PARALLEL SAFE
+  AS $$ SELECT lower(unaccent($1)) $$;
 
 -- Marca de cambios: el panel la consulta para saber si tiene que recargar.
 CREATE FUNCTION set_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -361,6 +370,8 @@ CREATE TABLE payments (
   status         varchar(15)  NOT NULL DEFAULT 'created'
                  CHECK (status IN ('created', 'captured', 'refund_pending', 'refunded', 'failed')),
   last_error     varchar(255) NULL,
+  -- Desde dónde pagó el cliente: allí vuelve al terminar (plantillas front.payment_*).
+  return_to      varchar(3)   NOT NULL DEFAULT 'web' CHECK (return_to IN ('web', 'app')),
   created_at     timestamp(0) NOT NULL,
   updated_at     timestamp(6) NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT uq_payments_order UNIQUE (order_id)

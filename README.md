@@ -31,7 +31,7 @@ docs/              Contrato de la API (OpenAPI) y guía para la web y la app
 Se construye por fases:
 
 1. **Esquema de PostgreSQL y conexión** (hecha).
-2. API `/api/v1` con tokens Bearer.
+2. **API `/api/v1` con tokens Bearer** (hecha).
 3. Pruebas automáticas.
 4. Avisos push con Firebase Cloud Messaging.
 5. Instalación, `openapi.yaml` y guía de integración.
@@ -49,3 +49,27 @@ psql -U mesalista -d mesalista -f bd/datos.sql
 ```
 
 `esquema.sql` borra y crea todas las tablas.
+
+## API en local
+
+1. Copia `php/config/config.example.php` como `php/config/config.php` y, para
+   desarrollo, pon `'require_https' => false` y `'test_clock' => true`.
+2. Arranca el servidor integrado de PHP (con la extensión `pdo_pgsql`):
+
+   ```bash
+   php -d extension=pdo_pgsql -S 127.0.0.1:8091 -t publico pruebas/dev-router.php
+   ```
+
+3. Crea una cuenta del personal: `php php/bin/create_user.php admin admin@mesalista.test "Administración"`.
+
+## Cómo se usa la API
+
+- Todas las rutas empiezan por `/api/v1/` y usan JSON.
+- `POST /api/v1/auth/login` (clientes) y `POST /api/v1/panel/login` (personal)
+  devuelven `session.token`. En las peticiones siguientes va en la cabecera
+  `Authorization: Bearer <token>`. Un token de cliente no sirve en el panel ni al revés.
+- Los errores tienen siempre la forma `{"error": {"code": "…", "message": "…"}}`.
+- La web llama a la API desde su PHP y envía la IP del navegador en
+  `X-Forwarded-For` (solo se acepta desde `trusted_proxies`).
+- Al pagar la señal se indica `{"from": "web"}` o `{"from": "app"}`; al terminar,
+  PayPal devuelve al cliente a la plantilla `front.payment_web` o `front.payment_app`.
