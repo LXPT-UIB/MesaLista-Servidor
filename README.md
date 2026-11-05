@@ -32,7 +32,7 @@ Se construye por fases:
 
 1. **Esquema de PostgreSQL y conexión** (hecha).
 2. **API `/api/v1` con tokens Bearer** (hecha).
-3. Pruebas automáticas.
+3. **Pruebas automáticas** (hecha: 28 casos, 321 comprobaciones correctas).
 4. Avisos push con Firebase Cloud Messaging.
 5. Instalación, `openapi.yaml` y guía de integración.
 
@@ -61,6 +61,21 @@ psql -U mesalista -d mesalista -f bd/datos.sql
    ```
 
 3. Crea una cuenta del personal: `php php/bin/create_user.php admin admin@mesalista.test "Administración"`.
+
+## Pruebas automáticas
+
+`pruebas/run.php` ejecuta los casos CP-01 a CP-28 contra la API con un reloj
+simulado. **Borra todos los datos**, así que solo se usa en local o en un
+servidor de pruebas con `'test_clock' => true` y la pasarela simulada
+(`'paypal' => ['mode' => 'fake']`):
+
+```bash
+php -d extension=pdo_pgsql pruebas/run.php http://127.0.0.1:8091 --yes
+php -d extension=pdo_pgsql pruebas/run.php http://127.0.0.1:8091 --yes --only=CP-06,CP-23
+```
+
+El correo se prueba contra `pruebas/azure-stub.php`, un servidor falso que
+comprueba la firma como Azure.
 
 ## Cómo se usa la API
 
