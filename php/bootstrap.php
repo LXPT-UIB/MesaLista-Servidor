@@ -37,6 +37,7 @@ require_once __DIR__ . '/Schedule.php';
 require_once __DIR__ . '/Auth.php';
 require_once __DIR__ . '/Qr.php';
 require_once __DIR__ . '/Mail.php';
+require_once __DIR__ . '/Push.php';
 require_once __DIR__ . '/Booking.php';
 require_once __DIR__ . '/Present.php';
 require_once __DIR__ . '/Admin.php';

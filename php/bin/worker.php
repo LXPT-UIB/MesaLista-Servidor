@@ -6,7 +6,8 @@ declare(strict_types=1);
 //
 //   * * * * *  worker.php           cada minuto: marca las no presentadas y las
 //                                   señales vencidas (RF-24, RF-44), reintenta
-//                                   las devoluciones y envía los correos pendientes
+//                                   las devoluciones y envía los correos y
+//                                   los avisos push pendientes
 //   0 4 * * *  worker.php --diario  cada día a las 04:00: borra los datos
 //                                   personales caducados (RP-03, RP-08)
 //
@@ -31,6 +32,10 @@ try {
     $sent = Mail::flush(50);
     if ($sent > 0) {
         fwrite(STDOUT, date('c') . " correos enviados: {$sent}\n");
+    }
+    $pushed = Push::flush(100);
+    if ($pushed > 0) {
+        fwrite(STDOUT, date('c') . " avisos push enviados: {$pushed}\n");
     }
 } catch (Throwable $e) {
     fwrite(STDERR, date('c') . ' worker: ' . get_class($e) . ' en ' . basename($e->getFile()) . ':' . $e->getLine() . "\n");

@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-// MesaLista · pruebas automáticas de la API (casos CP-01 a CP-28)
+// MesaLista · pruebas automáticas de la API (casos CP-01 a CP-28 y CP-35)
 //
 // Se ejecutan contra un servidor de PRUEBAS, en la misma máquina que la base
 // de datos, con 'test_clock' => true en config.php (reloj simulado con la
@@ -1608,6 +1608,110 @@ test('CP-28', 'Hash de contraseñas', function () {
     check($hashes[0] !== $hashes[1], 'dos cuentas con la misma contraseña tienen hashes distintos');
     check(str_starts_with($hashes[0], '$argon2id$v=19$m=19456,t=2,p=1$'), 'Argon2id con 19 MiB, 2 iteraciones y paralelismo 1', $hashes[0]);
     check(!str_contains(implode('', $hashes), 'Prueba-MesaLista'), 'no hay contraseñas en claro');
+});
+
+// ---------------------------------------------------------------------------
+// CP-35 · avisos push (FCM) de los mismos cambios que RF-17 y RF-32, contra un
+// servidor falso de Google (fcm-stub.php) que comprueba la firma de la cuenta
+// de servicio. CP-29 a CP-34 son las pruebas manuales de la memoria.
+// ---------------------------------------------------------------------------
+test('CP-35', 'Avisos push con Firebase Cloud Messaging', function () use ($PASSWORD) {
+    $port = 18098;
+    $rsa = fn() => openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+    $key = $rsa();
+    openssl_pkey_export($key, $privatePem);
+    $pub = (string) tempnam(sys_get_temp_dir(), 'ml-fcm');
+    file_put_contents($pub, openssl_pkey_get_details($key)['key']);
+    $log = (string) tempnam(sys_get_temp_dir(), 'ml-fcm');
+    $null = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
+    $stub = proc_open([PHP_BINARY, '-S', "127.0.0.1:{$port}", __DIR__ . '/fcm-stub.php'],
+        [['pipe', 'r'], ['file', $null, 'w'], ['file', $null, 'w']], $pipes, null,
+        array_merge(getenv(), ['ML_FCM_PUBKEY' => $pub, 'ML_FCM_LOG' => $log]));
+    for ($i = 0; $i < 50 && !@fsockopen('127.0.0.1', $port); $i++) {
+        usleep(100000);
+    }
+    $saved = $GLOBALS['ML_CONFIG']['fcm'] ?? null;
+    $use = function (string $pem) use ($port): void {
+        $GLOBALS['ML_CONFIG']['fcm'] = ['enabled' => true, 'project_id' => 'mesalista-pruebas',
+            'client_email' => 'push@mesalista-pruebas.iam.gserviceaccount.com', 'private_key' => $pem,
+            'token_uri' => "http://127.0.0.1:{$port}/token", 'api' => "http://127.0.0.1:{$port}"];
+    };
+    $outbox = fn() => Db::all('SELECT o.title, o.body, o.attempts, o.last_error, d.token FROM push_outbox o
+                                 JOIN push_devices d ON d.id = o.device_id ORDER BY o.id');
+    try {
+        $book = at(-3, '12:00');
+        $c = newClient($book);
+        $dev = 'dispositivo-de-prueba-' . bin2hex(random_bytes(8));
+        check($c->post('/me/devices', ['token' => $dev, 'platform' => 'android'])->status === 201, 'la app registra su dispositivo (201)');
+        check($c->post('/me/devices', ['token' => $dev, 'platform' => 'android'])->status === 200, 'registrarlo otra vez no lo duplica (200)');
+        check($c->post('/me/devices', ['token' => 'corto', 'platform' => 'android'])->status === 422
+            && $c->post('/me/devices', ['token' => $dev, 'platform' => 'windows'])->status === 422, 'un token o una plataforma no válidos: 422');
+        check(client($book)->post('/me/devices', ['token' => $dev, 'platform' => 'android'])->status === 401, 'sin sesión no se registra ningún dispositivo');
+
+        $r = reserve($c, day(), '21:00', 2, ['note' => 'Nota privada', 'consent' => true])->body['reservation'];
+        $rows = $outbox();
+        check(count($rows) === 1 && $rows[0]['title'] === 'Reserva confirmada' && str_contains($rows[0]['body'], 'a las 21:00')
+            && str_contains($rows[0]['body'], '2 comensales'), 'la reserva deja un aviso con el asunto, la hora y los comensales', $rows);
+        check(!str_contains((string) json_encode(Db::all('SELECT * FROM push_outbox')), 'Nota privada'), 'el aviso no lleva la nota (como RP-05)');
+
+        $GLOBALS['ML_CONFIG']['fcm'] = ['enabled' => false];
+        check(Push::flush() === 0 && count($outbox()) === 1, 'sin cuenta de servicio no se envía y el aviso espera en la cola');
+
+        $other = $rsa();
+        openssl_pkey_export($other, $otherPem);
+        $use($otherPem);
+        $rows = $outbox();
+        check(Push::flush() === 0 && (int) $outbox()[0]['attempts'] === 1 && str_contains((string) $outbox()[0]['last_error'], 'token de acceso'),
+            'con una clave que no es la de la cuenta, Google no da el token y se gasta un intento', $outbox());
+
+        $use($privatePem);
+        $sent = Push::flush();
+        $msg = json_decode((string) ((file($log, FILE_IGNORE_NEW_LINES) ?: [''])[0]), true)['message'] ?? [];
+        check($sent === 1 && $outbox() === [], 'con la cuenta de servicio buena se envía y sale de la cola');
+        check(($msg['token'] ?? '') === $dev && ($msg['notification']['title'] ?? '') === 'Reserva confirmada'
+            && ($msg['data']['type'] ?? '') === 'confirmed' && ($msg['data']['reservation_id'] ?? '') === (string) $r['id']
+            && ($msg['android']['priority'] ?? '') === 'high', 'FCM recibe el dispositivo, el título y el id de la reserva', $msg);
+
+        $c->post('/me/devices', ['token' => 'muerto-' . str_repeat('x', 20), 'platform' => 'android']);
+        $c->post("/reservations/{$r['id']}/cancel");
+        $sent = Push::flush();
+        check($sent === 1 && (int) Db::value("SELECT COUNT(*) FROM push_devices WHERE token LIKE 'muerto-%'") === 0,
+            'un dispositivo que FCM ya no conoce (404) se borra', $sent);
+
+        $c->post('/me/devices', ['token' => 'limite-' . str_repeat('x', 20), 'platform' => 'android']);
+        reserve($c, day(1), '21:00', 2);
+        $sent = Push::flush();
+        $rows = $outbox();
+        check($sent === 1 && count($rows) === 1 && (int) $rows[0]['attempts'] === 0 && str_contains((string) $rows[0]['last_error'], '429'),
+            'con el límite de FCM (429) el aviso vuelve a la cola sin gastar intentos', $rows);
+
+        Db::exec('UPDATE push_outbox SET created_at = ?', [date('Y-m-d H:i:s', time() - 7200)]);
+        check(Push::flush() === 0 && $outbox() === [], 'un aviso de hace más de una hora se descarta sin enviarlo');
+
+        $d = newClient($book);
+        check($d->post('/me/devices', ['token' => $dev, 'platform' => 'ios'])->status === 200
+            && (int) Db::value('SELECT user_id FROM push_devices WHERE token = ?', [$dev]) === (int) Db::value('SELECT id FROM users WHERE email = ?', [$d->email]),
+            'si otra cuenta entra en el mismo dispositivo, el token pasa a ella');
+        check($d->delete('/me/devices', ['token' => $dev])->status === 200 && Db::value('SELECT 1 FROM push_devices WHERE token = ?', [$dev]) === null,
+            'al cerrar sesión, la app da de baja el dispositivo');
+        $cid = (int) Db::value('SELECT id FROM users WHERE email = ?', [$c->email]);
+        $c->delete('/me', ['password' => $PASSWORD]);
+        check((int) Db::value('SELECT COUNT(*) FROM push_devices WHERE user_id = ?', [$cid]) === 0, 'al eliminar la cuenta se borran sus dispositivos');
+
+        $GLOBALS['ML_CONFIG']['fcm']['api'] = 'http://fcm.ejemplo.test';
+        try {
+            Push::send($dev, 'Prueba', 'Prueba');
+            check(false, 'una dirección de Google sin https debería rechazarse');
+        } catch (RuntimeException $e) {
+            check(str_contains($e->getMessage(), 'https'), 'la dirección de Google tiene que ser https', $e->getMessage());
+        }
+    } finally {
+        $GLOBALS['ML_CONFIG']['fcm'] = $saved;
+        proc_terminate($stub);
+        proc_close($stub);
+        @unlink($log);
+        @unlink($pub);
+    }
 });
 
 resetDatabase();

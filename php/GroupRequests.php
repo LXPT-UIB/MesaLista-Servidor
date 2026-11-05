@@ -108,6 +108,8 @@ final class GroupRequests
                 "Hola, {$u['name']}:\n\nLo sentimos: el restaurante no puede atender tu solicitud de grupo de "
                 . "{$g['party_size']} comensales para el " . Mail::when($start) . ".\n\n"
                 . "Motivo: {$reply}\n\nPuedes enviar otra solicitud para otra fecha desde la app MesaLista.\n");
+            Push::queueForEmail($u['email'], 'Solicitud de grupo no aceptada',
+                "{$g['party_size']} comensales · " . ucfirst(Mail::when($start)), ['type' => 'group_rejected']);
         });
     }
 
