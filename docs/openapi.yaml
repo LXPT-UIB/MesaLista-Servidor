@@ -1,0 +1,1841 @@
+openapi: 3.1.0
+info:
+  title: MesaLista · API del servidor
+  version: 1.0.0
+  description: |
+    API REST del servicio de reserva de mesas MesaLista. La usan la web (desde su
+    PHP) y la app. Todas las reglas del servicio están aquí: la web y la app solo
+    muestran lo que responde la API y envían lo que hace el usuario.
+
+    - Todo es JSON (`Content-Type: application/json`), salvo el CSV de la agenda.
+    - Sesiones: `POST /auth/login` (clientes) y `POST /panel/login` (personal y
+      administración) devuelven `session.token`. Se envía en cada petición como
+      `Authorization: Bearer <token>`. Un token de cliente no vale en el panel ni
+      al revés. Caducan: cliente, 60 minutos; panel, 8 horas o 30 minutos sin uso.
+    - Las peticiones automáticas del panel (sondeo) llevan `X-Background: 1` para
+      no contar como actividad.
+    - La web llama desde su PHP y envía la IP del navegador en `X-Forwarded-For`.
+    - Errores: siempre `{"error": {"code", "message"}}` (y a veces `field`). Hay
+      que reaccionar al `code`; `message` está en español y se puede mostrar.
+    - Fechas `AAAA-MM-DD`, horas `HH:MM` y fechas con hora `AAAA-MM-DD HH:MM`, en
+      hora de Madrid. `session.expires_at` va en ISO 8601 con desfase. El dinero,
+      en céntimos (`cents`) y como texto (`amount`, «60 €»).
+servers:
+  - url: https://lapp.spaincentral.cloudapp.azure.com/api/v1
+    description: Servidor de Azure
+  - url: http://127.0.0.1:8091/api/v1
+    description: Desarrollo en local
+
+tags:
+  - name: Público
+  - name: Cuenta
+  - name: Reservas
+  - name: Grupos y señal
+  - name: Avisos
+  - name: Panel
+  - name: Sala y mesas
+  - name: Administración
+
+security: []
+
+paths:
+  # --------------------------------------------------------------------------
+  # Público
+  # --------------------------------------------------------------------------
+  /config:
+    get:
+      tags: [Público]
+      summary: Parámetros del restaurante para la web y la app
+      responses:
+        '200':
+          description: Parámetros
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  min_party: {type: integer}
+                  max_party: {type: integer, description: Máximo de una reserva normal; por encima, solicitud de grupo}
+                  max_advance_days: {type: integer}
+                  duration_min: {type: integer}
+                  menu_options:
+                    type: array
+                    items: {$ref: '#/components/schemas/MenuOption'}
+                  today: {$ref: '#/components/schemas/Date'}
+                  max_group_party: {type: integer}
+                  deposit_per_person: {type: integer, description: Euros por persona de señal; 0 si no hay señal}
+                  deposit_hold_min: {type: integer}
+
+  /availability:
+    get:
+      tags: [Público]
+      summary: Horas de inicio libres para una fecha y unos comensales (RF-06)
+      parameters:
+        - {$ref: '#/components/parameters/DateRequired'}
+        - {$ref: '#/components/parameters/Party'}
+      responses:
+        '200':
+          description: Horas libres
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  times:
+                    type: array
+                    items: {$ref: '#/components/schemas/Time'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  # --------------------------------------------------------------------------
+  # Cuenta del cliente
+  # --------------------------------------------------------------------------
+  /auth/register:
+    post:
+      tags: [Cuenta]
+      summary: Crear una cuenta de cliente e iniciar su sesión (RF-01)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, phone, password]
+              properties:
+                name: {type: string, maxLength: 80}
+                email: {type: string, format: email}
+                phone: {type: string, example: '+34600111222'}
+                password: {type: string, minLength: 10, description: Fuera de la lista de contraseñas comunes (RS-09)}
+      responses:
+        '201':
+          description: Cuenta creada y sesión abierta
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LoginClient'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /auth/login:
+    post:
+      tags: [Cuenta]
+      summary: Iniciar sesión como cliente (RF-02)
+      description: Con 5 fallos en 15 minutos desde la misma IP se bloquea 15 minutos (429, RS-06).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Credentials'}
+      responses:
+        '200':
+          description: Sesión abierta
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LoginClient'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/Locked'}
+
+  /auth/logout:
+    post:
+      tags: [Cuenta]
+      summary: Cerrar la sesión; el token deja de valer (RF-03)
+      security: [{cliente: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+
+  /auth/forgot:
+    post:
+      tags: [Cuenta]
+      summary: Pedir el enlace para cambiar la contraseña (RF-40)
+      description: La respuesta es la misma exista o no la cuenta. El enlace del correo usa la plantilla `front.reset` y vale 30 minutos.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: {type: string, format: email}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+
+  /auth/reset:
+    post:
+      tags: [Cuenta]
+      summary: Elegir otra contraseña con el token del enlace (RF-40)
+      description: Cierra todas las sesiones de la cuenta.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: {type: string, pattern: '^[0-9a-f]{64}$'}
+                password: {type: string, minLength: 10}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /me:
+    get:
+      tags: [Cuenta]
+      summary: Perfil del cliente
+      security: [{cliente: []}]
+      responses:
+        '200':
+          description: Perfil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: {$ref: '#/components/schemas/Client'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    patch:
+      tags: [Cuenta]
+      summary: Cambiar el nombre o el teléfono (RF-04)
+      security: [{cliente: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                phone: {type: string}
+      responses:
+        '200':
+          description: Perfil actualizado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: {$ref: '#/components/schemas/Client'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/Invalid'}
+    delete:
+      tags: [Cuenta]
+      summary: Eliminar la cuenta (RF-05, RP-02)
+      description: Cancela sus reservas futuras, borra sus datos personales y sus dispositivos, y cierra la sesión.
+      security: [{cliente: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: {type: string}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+
+  # --------------------------------------------------------------------------
+  # Avisos
+  # --------------------------------------------------------------------------
+  /me/devices:
+    post:
+      tags: [Avisos]
+      summary: Registrar el dispositivo de la app para recibir avisos push (FCM)
+      description: |
+        La app lo llama al abrirse y cada vez que FCM le da un token nuevo. Si el
+        token era de otra cuenta, pasa a esta. Los dispositivos que no se
+        registran en 60 días se borran.
+      security: [{cliente: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Device'}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '201': {$ref: '#/components/responses/Ok'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '422': {$ref: '#/components/responses/Invalid'}
+    delete:
+      tags: [Avisos]
+      summary: Dar de baja el dispositivo (al cerrar sesión en la app)
+      security: [{cliente: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: {type: string}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /me/notifications:
+    get:
+      tags: [Avisos]
+      summary: Avisos sin leer en la app (RF-32)
+      security: [{cliente: []}]
+      responses:
+        '200':
+          description: Avisos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notifications:
+                    type: array
+                    items: {$ref: '#/components/schemas/Notification'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /me/notifications/read:
+    post:
+      tags: [Avisos]
+      summary: Marcar todos los avisos como leídos
+      security: [{cliente: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+
+  # --------------------------------------------------------------------------
+  # Reservas del cliente
+  # --------------------------------------------------------------------------
+  /reservations:
+    get:
+      tags: [Reservas]
+      summary: Reservas del cliente (RF-14)
+      security: [{cliente: []}]
+      responses:
+        '200':
+          description: Reservas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservations:
+                    type: array
+                    items: {$ref: '#/components/schemas/ReservationClient'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Reservas]
+      summary: Reservar (RF-07 a RF-13)
+      description: |
+        La mesa la asigna el servidor (RF-08). `request_id` es un UUID nuevo por
+        cada intento del usuario: si la petición se repite (corte de red), el
+        servidor devuelve la misma reserva con 200 y `replayed: true` (RF-10).
+        Opciones de menú y nota solo con `consent: true` (RP-04).
+      security: [{cliente: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id, date, time, party]
+              properties:
+                request_id: {type: string, format: uuid}
+                date: {$ref: '#/components/schemas/Date'}
+                time: {$ref: '#/components/schemas/Time'}
+                party: {type: integer, minimum: 1}
+                menu_options: {type: array, items: {type: integer}, description: ids de /config}
+                note: {type: string, maxLength: 200}
+                consent: {type: boolean}
+      responses:
+        '201':
+          description: Reserva confirmada
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReservationCreated'}
+        '200':
+          description: Era una repetición de una solicitud ya procesada
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReservationCreated'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /reservations/link:
+    post:
+      tags: [Reservas]
+      summary: Vincular a la cuenta una reserva hecha en el local (RF-30)
+      description: Con el código del ticket y el teléfono. El QR del ticket deja de valer. 5 fallos en 15 minutos bloquean (RS-13).
+      security: [{cliente: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, phone]
+              properties:
+                code: {type: string, minLength: 10, maxLength: 10}
+                phone: {type: string}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationClient'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {$ref: '#/components/responses/Locked'}
+
+  /reservations/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    get:
+      tags: [Reservas]
+      summary: Una reserva propia, con su QR si está confirmada
+      security: [{cliente: []}]
+      responses:
+        '200': {$ref: '#/components/responses/ReservationClient'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [Reservas]
+      summary: Modificar fecha, hora, comensales u opciones (RF-15)
+      description: Hasta el plazo de cambios. El cambio se aplica entero o no se aplica, y el QR anterior deja de valer.
+      security: [{cliente: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date: {$ref: '#/components/schemas/Date'}
+                time: {$ref: '#/components/schemas/Time'}
+                party: {type: integer}
+                menu_options: {type: array, items: {type: integer}}
+                note: {type: string, maxLength: 200}
+                consent: {type: boolean}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationClient'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /reservations/{id}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Reservas]
+      summary: Cancelar una reserva propia (RF-16)
+      description: Hasta el plazo de cancelación. Repetirla responde con éxito y no cambia nada.
+      security: [{cliente: []}]
+      responses:
+        '200': {$ref: '#/components/responses/ReservationClient'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  # --------------------------------------------------------------------------
+  # Grupos y señal
+  # --------------------------------------------------------------------------
+  /reservations/{id}/pay:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Grupos y señal]
+      summary: Empezar el pago de la señal con PayPal (RF-44)
+      description: |
+        Devuelve `approve_url`, la página de PayPal a la que hay que llevar al
+        cliente (navegador o pestaña del sistema en la app). Al terminar, PayPal
+        vuelve a `/payments/return`, el servidor cobra y redirige a
+        `front.payment_web` o `front.payment_app` con `pago=ok`, `error`,
+        `caducado` o `cancelado`.
+      security: [{cliente: []}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from: {type: string, enum: [web, app], default: web}
+      responses:
+        '200':
+          description: Página de PayPal
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approve_url: {type: string, format: uri}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /payments/return:
+    get:
+      tags: [Grupos y señal]
+      summary: Vuelta desde PayPal (la llama el navegador del cliente)
+      description: No necesita sesión. Cobra si la reserva sigue pendiente y dentro de plazo, y redirige a la web o a la app.
+      parameters:
+        - {name: token, in: query, required: true, schema: {type: string}, description: Pedido de PayPal}
+      responses:
+        '303':
+          description: Redirección a front.payment_web, front.payment_app o front.payment_unknown
+
+  /payments/fake-approve:
+    get:
+      tags: [Grupos y señal]
+      summary: Pasarela simulada (solo en un servidor de pruebas)
+      parameters:
+        - {name: token, in: query, required: true, schema: {type: string}}
+      responses:
+        '303': {description: Redirección a /payments/return}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /group-requests/times:
+    get:
+      tags: [Grupos y señal]
+      summary: Horas en las que se puede pedir un grupo ese día (RF-43)
+      parameters:
+        - {$ref: '#/components/parameters/DateRequired'}
+      responses:
+        '200':
+          description: Horas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  times:
+                    type: array
+                    items: {$ref: '#/components/schemas/Time'}
+
+  /group-requests:
+    get:
+      tags: [Grupos y señal]
+      summary: Solicitudes de grupo del cliente
+      security: [{cliente: []}]
+      responses:
+        '200': {$ref: '#/components/responses/GroupRequests'}
+    post:
+      tags: [Grupos y señal]
+      summary: Enviar una solicitud de grupo (RF-43)
+      description: Para más comensales que `max_party` y hasta `max_group_party`. El personal la acepta eligiendo mesas o la rechaza con un motivo.
+      security: [{cliente: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date, time, party]
+              properties:
+                date: {$ref: '#/components/schemas/Date'}
+                time: {$ref: '#/components/schemas/Time'}
+                party: {type: integer}
+                note: {type: string, maxLength: 200}
+                consent: {type: boolean}
+      responses:
+        '201': {$ref: '#/components/responses/GroupRequests'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /group-requests/{id}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Grupos y señal]
+      summary: Retirar una solicitud de grupo pendiente
+      security: [{cliente: []}]
+      responses:
+        '200': {$ref: '#/components/responses/GroupRequests'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  # --------------------------------------------------------------------------
+  # Panel del personal
+  # --------------------------------------------------------------------------
+  /panel/login:
+    post:
+      tags: [Panel]
+      summary: Iniciar sesión del personal o del administrador
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Credentials'}
+      responses:
+        '200':
+          description: Sesión del panel abierta
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: {$ref: '#/components/schemas/Staff'}
+                  session: {$ref: '#/components/schemas/Session'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {$ref: '#/components/responses/Locked'}
+
+  /panel/logout:
+    post:
+      tags: [Panel]
+      summary: Cerrar la sesión del panel
+      security: [{panel: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+
+  /panel/me:
+    get:
+      tags: [Panel]
+      summary: Quién ha iniciado sesión en el panel
+      security: [{panel: []}]
+      responses:
+        '200':
+          description: Usuario del panel
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: {$ref: '#/components/schemas/Staff'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /panel/version:
+    get:
+      tags: [Panel]
+      summary: Marca de cambios para refrescar sin recargar (RF-34)
+      description: 'El panel la pide cada segundo con `X-Background: 1` y solo vuelve a cargar los datos si cambia.'
+      security: [{panel: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Background'}
+      responses:
+        '200':
+          description: Marca
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: {type: string}
+
+  /panel/room:
+    get:
+      tags: [Sala y mesas]
+      summary: Estado en sala de cada mesa (RF-34)
+      security: [{panel: []}]
+      responses:
+        '200':
+          description: Mesas con su estado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  now: {$ref: '#/components/schemas/Time'}
+                  tables:
+                    type: array
+                    items: {$ref: '#/components/schemas/RoomTable'}
+
+  /panel/availability:
+    get:
+      tags: [Panel]
+      summary: Horas libres para una reserva en el local (sin antelación mínima)
+      security: [{panel: []}]
+      parameters:
+        - {$ref: '#/components/parameters/DateRequired'}
+        - {$ref: '#/components/parameters/Party'}
+      responses:
+        '200':
+          description: Horas libres
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  times: {type: array, items: {$ref: '#/components/schemas/Time'}}
+
+  /panel/reservations:
+    get:
+      tags: [Panel]
+      summary: Agenda de un día, con búsqueda por nombre o teléfono (RF-22, RF-27)
+      description: La búsqueda no distingue mayúsculas ni acentos.
+      security: [{panel: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Date'}
+        - {name: q, in: query, schema: {type: string, maxLength: 80}}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationsStaff'}
+    post:
+      tags: [Panel]
+      summary: Reserva hecha en el local, con ticket (RF-28, RF-29)
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, phone, date, time, party]
+              properties:
+                name: {type: string}
+                phone: {type: string}
+                date: {$ref: '#/components/schemas/Date'}
+                time: {$ref: '#/components/schemas/Time'}
+                party: {type: integer}
+                menu_options: {type: array, items: {type: integer}}
+                note: {type: string, maxLength: 200}
+                consent: {type: boolean}
+      responses:
+        '201':
+          description: Reserva y su ticket
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservation: {$ref: '#/components/schemas/ReservationStaff'}
+                  ticket: {$ref: '#/components/schemas/Ticket'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /panel/reservations.csv:
+    get:
+      tags: [Panel]
+      summary: Reservas de un día en CSV para Excel (RF-47)
+      description: CSV con BOM y «;». Las celdas que empiezan por = + - @ se escapan.
+      security: [{panel: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Date'}
+      responses:
+        '200':
+          description: Archivo CSV (Content-Disposition attachment)
+          content:
+            text/csv:
+              schema: {type: string}
+
+  /panel/reservations/{id}/ticket:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    get:
+      tags: [Panel]
+      summary: Ticket de una reserva del local (para volver a imprimirlo)
+      security: [{panel: []}]
+      responses:
+        '200':
+          description: Ticket
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket: {$ref: '#/components/schemas/Ticket'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/reservations/{id}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Panel]
+      summary: El restaurante cancela una reserva sin plazo (RF-31)
+      description: 'El titular recibe aviso y correo (RF-32). Con `refund: false` no se devuelve la señal.'
+      security: [{panel: []}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refund: {type: boolean, default: true}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationStaff'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/reservations/{id}/arrive:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Panel]
+      summary: Registrar la llegada sin QR (RF-21 a RF-23)
+      description: 'Si la mesa sigue ocupada, el servidor busca otra libre (RF-21). Con `early: true`, llegada anticipada si la mesa está libre (RF-23).'
+      security: [{panel: []}]
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Arrival'}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationStaff'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/arrive-qr:
+    post:
+      tags: [Panel]
+      summary: Registrar la llegada con el QR leído con la cámara (RF-19, RF-20, RS-07)
+      description: El texto del QR se envía tal cual; el servidor comprueba su firma, la versión y la ventana de llegada.
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/Arrival'}
+                - type: object
+                  required: [qr]
+                  properties:
+                    qr: {type: string, example: 'ML1.128.2.Fh3...'}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationStaff'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /panel/reservations/{id}/complete:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Panel]
+      summary: Terminar una reserva en curso (RF-25)
+      security: [{panel: []}]
+      responses:
+        '200': {$ref: '#/components/responses/ReservationStaff'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/reservations/{id}/party:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Panel]
+      summary: Más comensales en una reserva en curso (RF-26)
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [party]
+              properties:
+                party: {type: integer}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationStaff'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/walkin-tables:
+    get:
+      tags: [Sala y mesas]
+      summary: Mesas libres ahora para sentar a un cliente sin reserva (RF-33)
+      security: [{panel: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Party'}
+      responses:
+        '200':
+          description: Mesas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tables:
+                    type: array
+                    items:
+                      allOf:
+                        - {$ref: '#/components/schemas/TableBrief'}
+                        - type: object
+                          properties:
+                            min_capacity: {type: integer}
+                            fits: {type: boolean}
+
+  /panel/walkin:
+    post:
+      tags: [Sala y mesas]
+      summary: Sentar a un cliente sin reserva; la reserva nace en curso (RF-33)
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [party]
+              properties:
+                party: {type: integer}
+                table_id: {type: integer, description: Una mesa concreta}
+                table_ids: {type: array, items: {type: integer}, description: Varias mesas unidas}
+      responses:
+        '201': {$ref: '#/components/responses/ReservationStaff'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/close:
+    post:
+      tags: [Sala y mesas]
+      summary: '«Cerrar local» con el PIN: termina todas las reservas en curso'
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin]
+              properties:
+                pin: {type: string, pattern: '^[0-9]{4,8}$'}
+      responses:
+        '200':
+          description: Reservas terminadas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  completed: {type: integer}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/Locked'}
+
+  /panel/holds:
+    get:
+      tags: [Sala y mesas]
+      summary: Bloqueos de mesas y franjas (RF-45)
+      description: Sin `date`, los vigentes y próximos.
+      security: [{panel: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Date'}
+      responses:
+        '200': {$ref: '#/components/responses/Holds'}
+    post:
+      tags: [Sala y mesas]
+      summary: Bloquear mesas (o todas) durante un intervalo (RF-45)
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date, from, to, reason]
+              properties:
+                date: {$ref: '#/components/schemas/Date'}
+                from: {$ref: '#/components/schemas/Time'}
+                to: {$ref: '#/components/schemas/Time'}
+                reason: {type: string, maxLength: 120}
+                table_ids: {type: array, items: {type: integer}}
+                all: {type: boolean, description: Todas las mesas}
+      responses:
+        '201': {$ref: '#/components/responses/Holds'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /panel/holds/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    delete:
+      tags: [Sala y mesas]
+      summary: Quitar un bloqueo
+      security: [{panel: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Holds'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /panel/reservations/{id}/free-tables:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    get:
+      tags: [Sala y mesas]
+      summary: Mesas libres para mover o unir a esa reserva
+      security: [{panel: []}]
+      responses:
+        '200':
+          description: Mesas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tables:
+                    type: array
+                    items:
+                      allOf:
+                        - {$ref: '#/components/schemas/TableBrief'}
+                        - type: object
+                          properties:
+                            fits_as_main: {type: boolean}
+
+  /panel/reservations/{id}/move:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Sala y mesas]
+      summary: Cambiar la reserva de mesa
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [table_id]
+              properties:
+                table_id: {type: integer}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationStaff'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/reservations/{id}/join:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Sala y mesas]
+      summary: Unir mesas a la reserva
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [table_ids]
+              properties:
+                table_ids: {type: array, items: {type: integer}}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationStaff'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/reservations/{id}/separate:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Sala y mesas]
+      summary: Separar una mesa unida
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [table_id]
+              properties:
+                table_id: {type: integer}
+      responses:
+        '200': {$ref: '#/components/responses/ReservationStaff'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/group-requests:
+    get:
+      tags: [Grupos y señal]
+      summary: Solicitudes de grupo para el personal
+      security: [{panel: []}]
+      responses:
+        '200': {$ref: '#/components/responses/GroupRequests'}
+
+  /panel/group-requests/{id}/tables:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    get:
+      tags: [Grupos y señal]
+      summary: Mesas para la hora de una solicitud, con las libres marcadas
+      security: [{panel: []}]
+      responses:
+        '200':
+          description: Mesas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tables:
+                    type: array
+                    items:
+                      allOf:
+                        - {$ref: '#/components/schemas/TableBrief'}
+                        - type: object
+                          properties:
+                            free: {type: boolean}
+
+  /panel/group-requests/{id}/accept:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Grupos y señal]
+      summary: Aceptar una solicitud eligiendo las mesas (la primera es la principal)
+      description: Con señal configurada, la reserva queda pending_payment hasta que se pague.
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [table_ids]
+              properties:
+                table_ids: {type: array, items: {type: integer}}
+                reply: {type: string, maxLength: 200}
+      responses:
+        '200':
+          description: Reserva creada y solicitudes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reservation: {$ref: '#/components/schemas/ReservationStaff'}
+                  requests: {type: array, items: {$ref: '#/components/schemas/GroupRequest'}}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /panel/group-requests/{id}/reject:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    post:
+      tags: [Grupos y señal]
+      summary: Rechazar una solicitud con un motivo
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reply]
+              properties:
+                reply: {type: string, maxLength: 200}
+      responses:
+        '200': {$ref: '#/components/responses/GroupRequests'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  # --------------------------------------------------------------------------
+  # Administración (rol admin)
+  # --------------------------------------------------------------------------
+  /admin/tables:
+    get:
+      tags: [Administración]
+      summary: Mesas (RF-35)
+      security: [{panel: []}]
+      responses:
+        '200': {$ref: '#/components/responses/TablesAdmin'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Administración]
+      summary: Crear una mesa
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TableInput'}
+      responses:
+        '201': {$ref: '#/components/responses/TablesAdmin'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /admin/tables/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    patch:
+      tags: [Administración]
+      summary: Cambiar una mesa; al desactivarla, sus reservas futuras se recolocan o se cancelan con aviso
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TableInput'}
+      responses:
+        '200': {$ref: '#/components/responses/TablesAdmin'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+    delete:
+      tags: [Administración]
+      summary: Eliminar una mesa sin reservas pendientes ni en curso
+      security: [{panel: []}]
+      responses:
+        '200': {$ref: '#/components/responses/TablesAdmin'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /admin/tables/layout:
+    put:
+      tags: [Administración]
+      summary: Guardar el plano de la sala (posición y forma)
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tables]
+              properties:
+                tables:
+                  type: array
+                  items:
+                    type: object
+                    required: [id]
+                    properties:
+                      id: {type: integer}
+                      pos_x: {type: [integer, 'null'], minimum: 0, maximum: 1000}
+                      pos_y: {type: [integer, 'null'], minimum: 0, maximum: 600}
+                      shape: {type: string, enum: [rect, round]}
+      responses:
+        '200': {$ref: '#/components/responses/TablesAdmin'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /admin/close-pin:
+    put:
+      tags: [Administración]
+      summary: Fijar el PIN de «Cerrar local» (4 a 8 cifras)
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin]
+              properties:
+                pin: {type: string, pattern: '^[0-9]{4,8}$'}
+      responses:
+        '200': {$ref: '#/components/responses/Settings'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /admin/stats:
+    get:
+      tags: [Administración]
+      summary: Estadísticas de un periodo (RF-46); por defecto, 30 días
+      security: [{panel: []}]
+      parameters:
+        - {name: from, in: query, schema: {$ref: '#/components/schemas/Date'}}
+        - {name: to, in: query, schema: {$ref: '#/components/schemas/Date'}}
+      responses:
+        '200':
+          description: Estadísticas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from: {$ref: '#/components/schemas/Date'}
+                  to: {$ref: '#/components/schemas/Date'}
+                  by_status: {type: object, additionalProperties: true}
+                  by_source: {type: object, additionalProperties: {type: integer}}
+                  no_show_rate: {type: number}
+                  cancel_rate: {type: number}
+                  by_day: {type: array, items: {type: object, properties: {date: {type: string}, reservations: {type: integer}, people: {type: integer}}}}
+                  by_hour: {type: array, items: {type: object, properties: {time: {type: string}, reservations: {type: integer}, people: {type: integer}}}}
+                  by_service: {type: array, items: {type: object, additionalProperties: true}, description: Ocupación por franja de servicio}
+
+  /admin/clients:
+    get:
+      tags: [Administración]
+      summary: Clientes registrados, con búsqueda por nombre, correo o teléfono
+      security: [{panel: []}]
+      parameters:
+        - {name: q, in: query, schema: {type: string, maxLength: 80}}
+      responses:
+        '200':
+          description: Clientes (como mucho 500)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clients:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: integer}
+                        name: {type: string}
+                        email: {type: string}
+                        phone: {type: [string, 'null']}
+                        created_at: {type: string}
+                        reservations: {type: integer}
+                        upcoming: {type: integer}
+                        completed: {type: integer}
+                        no_show: {type: integer}
+                        last_reservation: {type: [string, 'null']}
+
+  /admin/schedule:
+    get:
+      tags: [Administración]
+      summary: Franjas de servicio y días cerrados (RF-36)
+      security: [{panel: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Schedule'}
+
+  /admin/schedule/slots:
+    put:
+      tags: [Administración]
+      summary: Sustituir todas las franjas de servicio
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slots]
+              properties:
+                slots:
+                  type: array
+                  items: {$ref: '#/components/schemas/Slot'}
+      responses:
+        '200': {$ref: '#/components/responses/Schedule'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /admin/schedule/closed:
+    post:
+      tags: [Administración]
+      summary: Cerrar un día
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DayInput'}
+      responses:
+        '200': {$ref: '#/components/responses/Schedule'}
+
+  /admin/schedule/open:
+    post:
+      tags: [Administración]
+      summary: Volver a abrir un día cerrado
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DayInput'}
+      responses:
+        '200': {$ref: '#/components/responses/Schedule'}
+
+  /admin/settings:
+    get:
+      tags: [Administración]
+      summary: Parámetros del servicio y opciones de menú (RF-37)
+      security: [{panel: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Settings'}
+    put:
+      tags: [Administración]
+      summary: Cambiar parámetros; solo afectan a las reservas nuevas
+      description: Cualquiera de los nombres de `settings`, cada uno dentro de su rango (`ranges`).
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: {type: integer}
+              example: {duration_min: 120, change_deadline_h: 24}
+      responses:
+        '200': {$ref: '#/components/responses/Settings'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /admin/menu-options:
+    post:
+      tags: [Administración]
+      summary: Añadir una opción de menú
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, minLength: 2, maxLength: 40}
+      responses:
+        '201': {$ref: '#/components/responses/Settings'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /admin/menu-options/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    patch:
+      tags: [Administración]
+      summary: Cambiar el nombre o activar y desactivar una opción
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                active: {type: boolean}
+      responses:
+        '200': {$ref: '#/components/responses/Settings'}
+
+  /admin/staff:
+    get:
+      tags: [Administración]
+      summary: Cuentas del personal (RF-38)
+      security: [{panel: []}]
+      responses:
+        '200': {$ref: '#/components/responses/StaffList'}
+    post:
+      tags: [Administración]
+      summary: Crear una cuenta del personal
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, role]
+              properties:
+                name: {type: string}
+                email: {type: string, format: email}
+                password: {type: string, minLength: 10}
+                role: {type: string, enum: [staff, admin]}
+      responses:
+        '201': {$ref: '#/components/responses/StaffList'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Invalid'}
+
+  /admin/staff/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    patch:
+      tags: [Administración]
+      summary: Cambiar nombre, rol, contraseña o desactivar una cuenta del personal
+      security: [{panel: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                role: {type: string, enum: [staff, admin]}
+                active: {type: boolean}
+                password: {type: string, minLength: 10}
+      responses:
+        '200': {$ref: '#/components/responses/StaffList'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+components:
+  securitySchemes:
+    cliente:
+      type: http
+      scheme: bearer
+      description: Token de `POST /auth/login` o `/auth/register` (clientes).
+    panel:
+      type: http
+      scheme: bearer
+      description: Token de `POST /panel/login`. Las rutas `/admin/*` exigen además el rol admin (403).
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: {type: integer, minimum: 1}
+    Date:
+      name: date
+      in: query
+      schema: {$ref: '#/components/schemas/Date'}
+      description: Por defecto, hoy
+    DateRequired:
+      name: date
+      in: query
+      required: true
+      schema: {$ref: '#/components/schemas/Date'}
+    Party:
+      name: party
+      in: query
+      required: true
+      schema: {type: integer, minimum: 1}
+    Background:
+      name: X-Background
+      in: header
+      schema: {type: string, enum: ['1']}
+      description: Petición automática del panel; no cuenta como actividad de la sesión
+
+  schemas:
+    Date: {type: string, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$', example: '2026-11-21'}
+    Time: {type: string, pattern: '^[0-9]{2}:[0-9]{2}$', example: '21:00'}
+    DateTime: {type: string, pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$', example: '2026-11-20 21:00'}
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                Códigos: bad_json, too_large, unsupported_type, https_required,
+                unauthenticated, bad_credentials, forbidden, bad_password, bad_pin,
+                not_found, method_not_allowed, invalid, closed, past, too_soon,
+                too_far, invalid_time, invalid_party, qr_invalid, conflict, limit,
+                deadline, email_taken, not_modifiable, not_cancellable, too_early,
+                no_show, already_seated, cancelled, completed, qr_outdated,
+                pending_payment, payment_expired, not_payable, table_busy,
+                table_joined, locked, reset_invalid, link_failed, payments_off,
+                server_error, entre otros.
+            message: {type: string, description: En español; se puede mostrar al usuario}
+            field: {type: string, description: Campo que falla, en los errores de validación}
+
+    Session:
+      type: object
+      properties:
+        token: {type: string, pattern: '^[0-9a-f]{64}$', description: Se envía como Authorization Bearer; no se vuelve a mostrar}
+        kind: {type: string, enum: [app, panel]}
+        expires_at: {type: string, format: date-time, example: '2026-11-05T18:00:00+01:00'}
+
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email: {type: string, format: email}
+        password: {type: string}
+
+    Client:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        email: {type: string}
+        phone: {type: [string, 'null']}
+
+    LoginClient:
+      type: object
+      properties:
+        user: {$ref: '#/components/schemas/Client'}
+        session: {$ref: '#/components/schemas/Session'}
+
+    Staff:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        email: {type: string}
+        role: {type: string, enum: [staff, admin]}
+        active: {type: boolean}
+
+    MenuOption:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+
+    Device:
+      type: object
+      required: [token, platform]
+      properties:
+        token: {type: string, minLength: 20, maxLength: 512, description: Token de registro de FCM}
+        platform: {type: string, enum: [android, ios]}
+
+    Notification:
+      type: object
+      properties:
+        id: {type: integer}
+        message: {type: string}
+        reservation_id: {type: [integer, 'null']}
+        created_at: {type: string, example: '2026-11-20 18:04:00'}
+
+    Deposit:
+      type: [object, 'null']
+      description: Señal de una reserva de grupo (RF-44), o null si no lleva
+      properties:
+        amount: {type: string, example: '60 €'}
+        cents: {type: integer}
+        due: {oneOf: [{$ref: '#/components/schemas/DateTime'}, {type: 'null'}], description: Límite para pagarla}
+        seconds_left: {type: [integer, 'null']}
+        payment: {type: [string, 'null'], enum: [null, captured, refund_pending, refunded]}
+
+    ReservationBase:
+      type: object
+      properties:
+        id: {type: integer}
+        status: {type: string, enum: [confirmed, seated, completed, cancelled, no_show, pending_payment]}
+        source: {type: string, enum: [app, local, walkin]}
+        date: {$ref: '#/components/schemas/Date'}
+        time: {$ref: '#/components/schemas/Time'}
+        end_time: {$ref: '#/components/schemas/Time'}
+        party: {type: integer}
+        table: {type: string, example: S-1, description: Código de la mesa principal}
+        tables: {type: array, items: {type: string}, description: Principal y unidas}
+        zone: {type: string}
+        menu_options: {type: array, items: {type: integer}, description: ids de las opciones de /config}
+        note: {type: [string, 'null']}
+        deposit: {$ref: '#/components/schemas/Deposit'}
+
+    ReservationClient:
+      allOf:
+        - {$ref: '#/components/schemas/ReservationBase'}
+        - type: object
+          properties:
+            modifiable: {type: boolean}
+            deadline: {$ref: '#/components/schemas/DateTime'}
+            arrival_window: {type: array, items: {$ref: '#/components/schemas/Time'}, minItems: 2, maxItems: 2}
+            qr: {type: [string, 'null'], description: Texto firmado del QR (ML1.id.versión.firma) para dibujarlo; null si no está confirmada}
+            group: {type: boolean, description: Reserva de grupo; los cambios se piden por teléfono}
+            payable: {type: boolean, description: Se puede pagar la señal ahora}
+
+    ReservationCreated:
+      type: object
+      properties:
+        reservation: {$ref: '#/components/schemas/ReservationClient'}
+        replayed: {type: boolean}
+
+    ReservationStaff:
+      allOf:
+        - {$ref: '#/components/schemas/ReservationBase'}
+        - type: object
+          properties:
+            name: {type: [string, 'null']}
+            phone: {type: [string, 'null']}
+            linked: {type: boolean, description: Vinculada a una cuenta}
+            arrived_at: {oneOf: [{$ref: '#/components/schemas/Time'}, {type: 'null'}]}
+            max_capacity: {type: integer, description: Plazas sumando las mesas unidas}
+            arrival_window: {type: array, items: {$ref: '#/components/schemas/Time'}}
+            has_ticket: {type: boolean}
+            cancelled_by: {type: [string, 'null'], enum: [null, holder, restaurant, system]}
+
+    Ticket:
+      type: object
+      description: RP-07 — solo fecha, hora, comensales, QR y código
+      properties:
+        date: {$ref: '#/components/schemas/Date'}
+        time: {$ref: '#/components/schemas/Time'}
+        party: {type: integer}
+        code: {type: string}
+        qr: {type: string}
+
+    Arrival:
+      type: object
+      properties:
+        early: {type: boolean, default: false, description: Llegada anticipada (RF-23)}
+
+    GroupRequest:
+      type: object
+      properties:
+        id: {type: integer}
+        date: {$ref: '#/components/schemas/Date'}
+        time: {$ref: '#/components/schemas/Time'}
+        party: {type: integer}
+        note: {type: [string, 'null']}
+        status: {type: string, enum: [pending, accepted, rejected, expired, cancelled]}
+        reply: {type: [string, 'null']}
+        reservation_id: {type: [integer, 'null']}
+        created_at: {type: string}
+        name: {type: string, description: Solo en el panel}
+        phone: {type: string, description: Solo en el panel}
+        email: {type: string, description: Solo en el panel}
+
+    Hold:
+      type: object
+      properties:
+        id: {type: integer}
+        table: {type: [string, 'null'], description: Código de la mesa; null = todas}
+        date: {$ref: '#/components/schemas/Date'}
+        from: {$ref: '#/components/schemas/Time'}
+        to: {$ref: '#/components/schemas/Time'}
+        until: {$ref: '#/components/schemas/DateTime'}
+        reason: {type: string}
+        active: {type: boolean, description: En vigor ahora}
+
+    TableBrief:
+      type: object
+      properties:
+        id: {type: integer}
+        number: {type: integer}
+        code: {type: string, example: T-2}
+        zone: {type: string}
+        max_capacity: {type: integer}
+        join_only: {type: boolean, description: Mesa extra, solo para unir}
+
+    TableAdmin:
+      allOf:
+        - {$ref: '#/components/schemas/TableBrief'}
+        - type: object
+          properties:
+            min_capacity: {type: integer}
+            active: {type: boolean}
+            pos_x: {type: [integer, 'null']}
+            pos_y: {type: [integer, 'null']}
+            shape: {type: string, enum: [rect, round]}
+
+    TableInput:
+      type: object
+      properties:
+        number: {type: integer}
+        zone: {type: string}
+        min_capacity: {type: integer}
+        max_capacity: {type: integer}
+        active: {type: boolean}
+        join_only: {type: boolean}
+
+    RoomTable:
+      allOf:
+        - {$ref: '#/components/schemas/TableAdmin'}
+        - type: object
+          properties:
+            state: {type: string, enum: [free, occupied, blocked, out_of_service]}
+            joined_to: {type: [string, 'null'], description: Mesa principal si está unida a otra}
+            hold: {type: [object, 'null'], properties: {reason: {type: string}, until: {type: string}}}
+            current: {type: [object, 'null'], description: Reserva en curso (vista del personal)}
+            next: {type: [object, 'null'], description: Próxima reserva de hoy}
+
+    Slot:
+      type: object
+      required: [weekday, open, close]
+      properties:
+        weekday: {type: integer, minimum: 1, maximum: 7, description: 1 = lunes}
+        open: {$ref: '#/components/schemas/Time'}
+        close: {type: string, example: '00:00', description: '00:00 = medianoche'}
+
+    DayInput:
+      type: object
+      required: [date]
+      properties:
+        date: {$ref: '#/components/schemas/Date'}
+
+  responses:
+    Ok:
+      description: Hecho
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: {type: boolean, const: true}
+    ReservationClient:
+      description: Reserva (vista del cliente)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              reservation: {$ref: '#/components/schemas/ReservationClient'}
+    ReservationStaff:
+      description: Reserva (vista del personal)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              reservation: {$ref: '#/components/schemas/ReservationStaff'}
+    ReservationsStaff:
+      description: Reservas del día
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              reservations:
+                type: array
+                items: {$ref: '#/components/schemas/ReservationStaff'}
+    GroupRequests:
+      description: Solicitudes de grupo
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              requests:
+                type: array
+                items: {$ref: '#/components/schemas/GroupRequest'}
+    Holds:
+      description: Bloqueos
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              holds:
+                type: array
+                items: {$ref: '#/components/schemas/Hold'}
+    TablesAdmin:
+      description: Mesas (en los cambios, también moved, cancelled o deleted)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              tables:
+                type: array
+                items: {$ref: '#/components/schemas/TableAdmin'}
+              table_id: {type: integer, description: Mesa creada o cambiada}
+              moved: {type: integer, description: Reservas futuras pasadas a otra mesa}
+              cancelled: {type: integer, description: Reservas futuras canceladas con aviso}
+              deleted: {type: boolean}
+    Schedule:
+      description: Franjas y días cerrados
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              slots: {type: array, items: {$ref: '#/components/schemas/Slot'}}
+              closed_days: {type: array, items: {$ref: '#/components/schemas/Date'}}
+    Settings:
+      description: Parámetros, sus rangos y las opciones de menú
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              settings: {type: object, additionalProperties: {type: integer}}
+              ranges: {type: object, additionalProperties: {type: array, items: {type: integer}}}
+              menu_options:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: {type: integer}
+                    name: {type: string}
+                    active: {type: boolean}
+              close_pin_set: {type: boolean}
+    StaffList:
+      description: Cuentas del personal
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              staff: {type: array, items: {$ref: '#/components/schemas/Staff'}}
+    BadRequest:
+      description: Petición mal formada o enlace no válido
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: Sin sesión, sesión caducada o credenciales incorrectas
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: Sin permiso (rol) o contraseña o PIN incorrectos
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: No existe o no es del cliente (RS-03)
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: Choca con una regla o con otra reserva (code dice cuál)
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Invalid:
+      description: Datos no válidos (field dice cuál)
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Locked:
+      description: Demasiados intentos fallidos; bloqueado 15 minutos
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unavailable:
+      description: Servicio externo no disponible (p. ej. PayPal sin configurar)
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}

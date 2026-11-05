@@ -104,7 +104,6 @@ $router->add('DELETE', '/me', function () use ($body) {
     return ['ok' => true];
 });
 
-// RF-32: avisos de cancelaciones hechas por el restaurante.
 // Avisos push: la app registra el token de FCM del dispositivo al abrirse y
 // lo da de baja al cerrar sesión.
 $router->add('POST', '/me/devices', function () use ($body) {
@@ -116,6 +115,7 @@ $router->add('DELETE', '/me/devices', function () use ($body) {
     return ['ok' => true];
 });
 
+// RF-32: avisos de cancelaciones hechas por el restaurante.
 $router->add('GET', '/me/notifications', function () {
     $u = Auth::client();
     return ['notifications' => array_map(fn($n) => [
@@ -162,8 +162,8 @@ $router->add('POST', '/reservations/{id}/cancel', fn($p) => [
     'reservation' => Present::client(Booking::cancelByHolder(Auth::client(), $p['id'])),
 ]);
 
-// RF-44: pagar la señal. Devuelve la página de PayPal a la que llevar al cliente.
-// RF-44: {"from": "web"} o {"from": "app"}: adónde vuelve el cliente al terminar.
+// RF-44: pagar la señal. Devuelve la página de PayPal a la que llevar al
+// cliente; {"from": "web"} o {"from": "app"} dice adónde vuelve al terminar.
 $router->add('POST', '/reservations/{id}/pay', function ($p) use ($body) {
     $in = $body();
     V::only($in, ['from']);
