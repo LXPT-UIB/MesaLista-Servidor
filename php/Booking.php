@@ -417,7 +417,7 @@ final class Booking
                 ]);
                 self::saveExtras($id, $options, $note, $consent);
                 Mail::queueReservation('confirmed', $user['email'], $user['name'],
-                    ['start_at' => Clock::sql($start), 'party_size' => $party]);
+                    ['id' => $id, 'start_at' => Clock::sql($start), 'party_size' => $party]);
                 return [$id, true];
             });
         } catch (PDOException $e) {
@@ -534,7 +534,7 @@ final class Booking
                 self::saveExtras($id, $options, $note, $consent);
             }
             Mail::queueReservation('modified', $user['email'], $user['name'],
-                ['start_at' => Clock::sql($start), 'party_size' => $newParty]);
+                ['id' => $id, 'start_at' => Clock::sql($start), 'party_size' => $newParty]);
         });
         return self::mustLoad($id);
     }
@@ -783,10 +783,10 @@ final class Booking
                 $text = 'Señal: ' . Payments::euros($deposit) . '. Tienes hasta las ' . $due->format('H:i') . ' del '
                     . $due->format('d/m/Y') . ' para pagarla; si no, la reserva se libera.' . $replyText;
                 $message = "Han aceptado tu grupo {$when}. Paga la señal de " . Payments::euros($deposit) . ' antes de las ' . $due->format('H:i') . '.';
-                Mail::queueReservation('group_accepted', $u['email'], $u['name'], ['start_at' => Clock::sql($start), 'party_size' => $party], $text);
+                Mail::queueReservation('group_accepted', $u['email'], $u['name'], ['id' => $id, 'start_at' => Clock::sql($start), 'party_size' => $party], $text);
             } else {
                 $message = "Han aceptado tu grupo {$when}: la reserva está confirmada.";
-                Mail::queueReservation('confirmed', $u['email'], $u['name'], ['start_at' => Clock::sql($start), 'party_size' => $party], trim($replyText));
+                Mail::queueReservation('confirmed', $u['email'], $u['name'], ['id' => $id, 'start_at' => Clock::sql($start), 'party_size' => $party], trim($replyText));
             }
             Db::exec('INSERT INTO notifications (user_id, reservation_id, message, created_at) VALUES (?, ?, ?, ?)',
                 [$g['user_id'], $id, mb_substr($message, 0, 255), Clock::sql()]);

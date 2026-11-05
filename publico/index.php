@@ -65,9 +65,10 @@ try {
     }
 }
 
-// Los correos y las devoluciones de PayPal se hacen después de responder, para
-// no retrasar la respuesta. Lo que falle lo reintenta bin/worker.php cada minuto.
-if (Mail::$queued || Payments::$refundsQueued) {
+// Los correos, los avisos push y las devoluciones de PayPal se hacen después de
+// responder, para no retrasar la respuesta. Lo que falle lo reintenta
+// bin/worker.php cada minuto.
+if (Mail::$queued || Push::$queued || Payments::$refundsQueued) {
     if (function_exists('fastcgi_finish_request')) {
         fastcgi_finish_request();
     }
@@ -82,5 +83,10 @@ if (Mail::$queued || Payments::$refundsQueued) {
         Mail::flush();
     } catch (Throwable $e) {
         error_log('MesaLista: envío de correo aplazado (' . get_class($e) . ')');
+    }
+    try {
+        Push::flush();
+    } catch (Throwable $e) {
+        error_log('MesaLista: aviso push aplazado (' . get_class($e) . ')');
     }
 }

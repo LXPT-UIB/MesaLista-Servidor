@@ -105,6 +105,17 @@ $router->add('DELETE', '/me', function () use ($body) {
 });
 
 // RF-32: avisos de cancelaciones hechas por el restaurante.
+// Avisos push: la app registra el token de FCM del dispositivo al abrirse y
+// lo da de baja al cerrar sesión.
+$router->add('POST', '/me/devices', function () use ($body) {
+    $new = Push::register(Auth::client(), $body());
+    return ['ok' => true, '_status' => $new ? 201 : 200];
+});
+$router->add('DELETE', '/me/devices', function () use ($body) {
+    Push::unregister(Auth::client(), $body());
+    return ['ok' => true];
+});
+
 $router->add('GET', '/me/notifications', function () {
     $u = Auth::client();
     return ['notifications' => array_map(fn($n) => [

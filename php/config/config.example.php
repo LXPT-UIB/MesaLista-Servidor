@@ -55,6 +55,18 @@ return [
         'sender'            => '',
     ],
 
+    // Avisos push en la app con Firebase Cloud Messaging. Datos de la cuenta de
+    // servicio del proyecto de Firebase (Configuración del proyecto > Cuentas de
+    // servicio > Generar nueva clave privada). Se rellenan con
+    // php/bin/configure_fcm.php a partir de ese archivo JSON. Sin ellos, los
+    // avisos esperan en push_outbox y a la hora se descartan.
+    'fcm' => [
+        'enabled'      => false,
+        'project_id'   => '',
+        'client_email' => '',
+        'private_key'  => '',
+    ],
+
     // RF-44: señal de los grupos con PayPal, SIEMPRE en modo sandbox (pruebas).
     // Claves de developer.paypal.com > Apps & Credentials > Sandbox. Se rellenan
     // con php/bin/configure_paypal.php. Sin claves, los grupos aceptados se

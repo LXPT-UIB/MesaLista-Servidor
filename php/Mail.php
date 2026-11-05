@@ -65,6 +65,8 @@ final class Mail
             . "Comensales: {$people}\n\n"
             . "Puedes consultar tus reservas en la app MesaLista.\n";
         self::queue($to, $subject, $body);
+        // El mismo cambio llega también como aviso push a la app del cliente.
+        Push::queueReservation($event, $to, $reservation, $subject);
     }
 
     /** Correo cualquiera a la cola (el asunto lleva delante «MesaLista · »). */
