@@ -1,0 +1,10 @@
+# Los scripts se ejecutan en Ubuntu: siempre con saltos de línea LF
+*.sh   text eol=lf
+*.conf text eol=lf
+*.sql  text eol=lf
+*.php  text eol=lf
+*.yaml text eol=lf
+
+# Binarios: nunca se tocan los saltos de línea
+*.pdf  binary
+*.png  binary
