@@ -32,8 +32,8 @@ Se construye por fases:
 
 1. **Esquema de PostgreSQL y conexión** (hecha).
 2. **API `/api/v1` con tokens Bearer** (hecha).
-3. **Pruebas automáticas** (hecha: 28 casos, 321 comprobaciones correctas).
-4. Avisos push con Firebase Cloud Messaging.
+3. **Pruebas automáticas** (hecha).
+4. **Avisos push con Firebase Cloud Messaging** (hecha: 29 casos, 338 comprobaciones correctas).
 5. Instalación, `openapi.yaml` y guía de integración.
 
 ## Base de datos en local
@@ -64,7 +64,8 @@ psql -U mesalista -d mesalista -f bd/datos.sql
 
 ## Pruebas automáticas
 
-`pruebas/run.php` ejecuta los casos CP-01 a CP-28 contra la API con un reloj
+`pruebas/run.php` ejecuta los casos CP-01 a CP-28 y CP-35 (avisos push; CP-29 a
+CP-34 son pruebas manuales) contra la API con un reloj
 simulado. **Borra todos los datos**, así que solo se usa en local o en un
 servidor de pruebas con `'test_clock' => true` y la pasarela simulada
 (`'paypal' => ['mode' => 'fake']`):
@@ -74,8 +75,9 @@ php -d extension=pdo_pgsql pruebas/run.php http://127.0.0.1:8091 --yes
 php -d extension=pdo_pgsql pruebas/run.php http://127.0.0.1:8091 --yes --only=CP-06,CP-23
 ```
 
-El correo se prueba contra `pruebas/azure-stub.php`, un servidor falso que
-comprueba la firma como Azure.
+El correo se prueba contra `pruebas/azure-stub.php` y los avisos push contra
+`pruebas/fcm-stub.php`: servidores falsos que comprueban las firmas como Azure
+y como Google.
 
 ## Cómo se usa la API
 
@@ -88,3 +90,27 @@ comprueba la firma como Azure.
   `X-Forwarded-For` (solo se acepta desde `trusted_proxies`).
 - Al pagar la señal se indica `{"from": "web"}` o `{"from": "app"}`; al terminar,
   PayPal devuelve al cliente a la plantilla `front.payment_web` o `front.payment_app`.
+
+## Avisos push (Firebase Cloud Messaging)
+
+- La app registra el token de FCM del dispositivo con
+  `POST /api/v1/me/devices` `{"token": "…", "platform": "android"}` al abrirse y
+  cuando FCM le da uno nuevo, y lo da de baja con `DELETE /api/v1/me/devices`
+  `{"token": "…"}` al cerrar sesión.
+- Cada cambio que envía un correo de reserva (confirmada, modificada, cancelada,
+  grupo aceptado o rechazado, señal cobrada o vencida) envía también un aviso a
+  sus dispositivos: título, fecha, hora y comensales, y en `data` el tipo
+  (`type`) y el id de la reserva (`reservation_id`). Nunca el QR, las opciones
+  ni la nota.
+- El servidor usa la cuenta de servicio del proyecto de Firebase. En la consola
+  de Firebase: *Configuración del proyecto › Cuentas de servicio › Generar nueva
+  clave privada*. Después, en el servidor:
+
+  ```bash
+  sudo php /var/www/mesalista-servidor/php/bin/configure_fcm.php <archivo.json>
+  ```
+
+  Comprueba con Google que la cuenta funciona y la guarda en `config.php`. Luego
+  se puede borrar el `.json`.
+- Un aviso que no se ha podido enviar en una hora se descarta; los dispositivos
+  que FCM ya no conoce se borran solos.
