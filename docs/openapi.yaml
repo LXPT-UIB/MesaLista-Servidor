@@ -21,7 +21,7 @@ info:
       hora de Madrid. `session.expires_at` va en ISO 8601 con desfase. El dinero,
       en céntimos (`cents`) y como texto (`amount`, «60 €»).
 servers:
-  - url: https://lapp.spaincentral.cloudapp.azure.com/api/v1
+  - url: https://mesalista.spaincentral.cloudapp.azure.com/api/v1
     description: Servidor de Azure
   - url: http://127.0.0.1:8091/api/v1
     description: Desarrollo en local

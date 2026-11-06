@@ -2,9 +2,10 @@
 # MesaLista · instalación del servidor (API + PostgreSQL) en una máquina virtual
 # de Microsoft Azure con Ubuntu Server 24.04 LTS
 #
-# Desde el clon del repositorio en la máquina:
-#   sudo bash despliegue/install.sh              instala o actualiza
-#   sudo bash despliegue/install.sh --reset-db   además borra y recrea la base de datos
+# Desde la copia del repositorio en la máquina:
+#   sudo bash despliegue/install.sh                      instala o actualiza
+#   sudo bash despliegue/install.sh --dominio <dominio>  cambia el dominio guardado
+#   sudo bash despliegue/install.sh --reset-db           además borra y recrea la base de datos
 #
 # Se puede ejecutar varias veces: no borra datos salvo con --reset-db.
 # Los datos que pide la primera vez se guardan en /etc/mesalista/install.env.
@@ -27,18 +28,44 @@ WEB_DIR=/var/www/mesalista-web
 LIB_DIR=/usr/local/lib/mesalista
 ETC_DIR=/etc/mesalista
 ENV_FILE=$ETC_DIR/install.env
+DB_NAME=mesalista
+
 RESET_DB=0
-[[ "${1:-}" == "--reset-db" ]] && RESET_DB=1
+NUEVO_DOMINIO=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --reset-db)  RESET_DB=1 ;;
+        --dominio)   NUEVO_DOMINIO=${2:-}; shift ;;
+        --dominio=*) NUEVO_DOMINIO=${1#*=} ;;
+        -h|--help)   sed -n '2,11p' "$0"; exit 0 ;;
+        *)           echo "Opción desconocida: $1 (usa --help)" >&2; exit 1 ;;
+    esac
+    shift
+done
 
 say()  { printf '\n\033[1;33m== %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; }
-psql_admin() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 "$@"; }
 
 [[ $EUID -eq 0 ]] || { warn "Ejecuta el script con sudo."; exit 1; }
+[[ -f "$REPO_DIR/bd/esquema.sql" && -f "$REPO_DIR/php/routes.php" ]] \
+    || { warn "No encuentro bd/ y php/ en $REPO_DIR."; exit 1; }
 # shellcheck source=/dev/null
 source /etc/os-release
 [[ "$ID" == "ubuntu" && "$VERSION_ID" == "24.04" ]] \
     || warn "Pensado para Ubuntu Server 24.04 LTS; detectado $PRETTY_NAME."
+
+# PostgreSQL se maneja como el usuario «postgres», que no puede entrar en las
+# carpetas personales (en Ubuntu 24.04 /home/<usuario> es privada, permisos 750)
+# y por tanto no puede leer los .sql de la copia del repositorio. Por eso el
+# script trabaja desde «/» y los .sql llegan a psql por la entrada estándar,
+# que abre root.
+cd /
+psql_admin() { sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 "$@"; }
+# psql_owner ARCHIVO…: los ejecuta en una sola transacción como mesalista_owner
+# (dueño de todo); si algo falla, no queda nada a medias.
+psql_owner() {
+    { printf 'SET ROLE mesalista_owner;\n'; cat -- "$@"; } | psql_admin -1 -d "$DB_NAME" -f -
+}
 
 # ---------------------------------------------------------------------------
 # Datos de la instalación
@@ -54,13 +81,17 @@ ask() {  # ask VARIABLE "Pregunta" [secreto]
     if [[ -n "$secret" ]]; then read -rsp "$prompt: " value; echo; else read -rp "$prompt: " value; fi
     printf -v "$var" '%s' "$value"
 }
+normalizar_dominio() {
+    printf '%s' "$1" | tr 'A-Z' 'a-z' | sed -e 's#^https\?://##' -e 's#/.*$##' -e 's#:.*$##'
+}
 
 say "Configuración"
 # El dominio es la etiqueta DNS de la IP pública de Azure (Dirección IP
 # pública > Configuración > Etiqueta de nombre DNS): con una IP estática,
 # apunta siempre a esta máquina.
-ask SERVER_DOMAIN "Dominio del servidor (p. ej. lapp.spaincentral.cloudapp.azure.com)"
-SERVER_DOMAIN=$(printf '%s' "$SERVER_DOMAIN" | tr 'A-Z' 'a-z' | sed -e 's#^https\?://##' -e 's#/.*$##')
+[[ -n "$NUEVO_DOMINIO" ]] && SERVER_DOMAIN=$NUEVO_DOMINIO
+ask SERVER_DOMAIN "Dominio del servidor (p. ej. mesalista.spaincentral.cloudapp.azure.com)"
+SERVER_DOMAIN=$(normalizar_dominio "$SERVER_DOMAIN")
 [[ "$SERVER_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] \
     || { warn "«$SERVER_DOMAIN» no es un dominio válido."; exit 1; }
 DOMAIN=$SERVER_DOMAIN
@@ -83,6 +114,18 @@ umask 077
 } > "$ENV_FILE"
 umask 022
 
+# Let's Encrypt necesita que el dominio apunte a la IP pública de esta máquina.
+IP_DOMINIO=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
+IP_PUBLICA=$(curl -s --max-time 3 -H Metadata:true \
+    "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text" || true)
+if [[ -z "$IP_DOMINIO" ]]; then
+    warn "$DOMAIN no resuelve todavía: revisa la etiqueta DNS de la IP pública en Azure."
+elif [[ "$IP_PUBLICA" =~ ^[0-9.]+$ && "$IP_DOMINIO" != "$IP_PUBLICA" ]]; then
+    warn "$DOMAIN apunta a $IP_DOMINIO, pero la IP pública de esta máquina es $IP_PUBLICA."
+else
+    echo "$DOMAIN → $IP_DOMINIO"
+fi
+
 # ---------------------------------------------------------------------------
 # Paquetes y hora del servidor (regla 2: hora de Madrid)
 # ---------------------------------------------------------------------------
@@ -98,11 +141,13 @@ timedatectl set-ntp true || true
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 # Paquetes sin versión: instalan los de la distribución (PHP 8.3 y PostgreSQL 16 en Ubuntu 24.04).
+# postgresql-contrib trae las extensiones btree_gist y unaccent que usa el esquema.
 apt-get install -y -q \
     apache2 php-fpm php-cli php-pgsql php-mbstring php-curl \
-    postgresql certbot ufw curl rsync cron openssl
+    postgresql postgresql-contrib certbot ufw curl rsync cron openssl
 PHP_VER=$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')
-PG_VER=$(psql -V | grep -oE '[0-9]+' | head -1)
+PG_VER=$(find /usr/lib/postgresql -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -1)
+[[ -n "$PG_VER" ]] || { warn "No se ha instalado PostgreSQL."; exit 1; }
 echo "PHP ${PHP_VER} · PostgreSQL ${PG_VER}"
 
 # ---------------------------------------------------------------------------
@@ -110,40 +155,58 @@ echo "PHP ${PHP_VER} · PostgreSQL ${PG_VER}"
 # dueño del esquema y mesalista, el de la API, solo lee y escribe datos.
 # ---------------------------------------------------------------------------
 say "PostgreSQL"
-PG_CONF=/etc/postgresql/${PG_VER}/main/conf.d/60-mesalista.conf
-cat > "$PG_CONF" <<'EOF'
+# Ubuntu crea el clúster «main» al instalar el paquete; si no existe, se crea aquí.
+if ! pg_lsclusters --no-header 2>/dev/null | awk -v v="$PG_VER" '$1 == v && $2 == "main" { ok = 1 } END { exit !ok }'; then
+    pg_createcluster "$PG_VER" main --locale=C.UTF-8 --encoding=UTF8 >/dev/null
+    echo "Clúster ${PG_VER}/main creado."
+fi
+PG_CONF_DIR=/etc/postgresql/${PG_VER}/main/conf.d
+mkdir -p "$PG_CONF_DIR"
+cat > "$PG_CONF_DIR/60-mesalista.conf" <<'EOF'
 # MesaLista
 listen_addresses = 'localhost'
 timezone = 'Europe/Madrid'
 log_timezone = 'Europe/Madrid'
 EOF
-systemctl restart postgresql
+systemctl enable "postgresql@${PG_VER}-main" >/dev/null 2>&1 || true
+systemctl restart "postgresql@${PG_VER}-main"
+# Tras reiniciar tarda unos segundos en aceptar conexiones.
+for _ in $(seq 1 30); do
+    pg_isready -q && break
+    sleep 1
+done
+pg_isready -q || { warn "PostgreSQL no arranca: journalctl -u postgresql@${PG_VER}-main"; exit 1; }
 
 DB_PASS=""
 if [[ -f "$PHP_DIR/config/config.php" ]]; then
-    DB_PASS=$(php -r 'echo (require $argv[1])["db"]["pass"];' "$PHP_DIR/config/config.php")
+    DB_PASS=$(php -r 'echo (require $argv[1])["db"]["pass"] ?? "";' "$PHP_DIR/config/config.php")
 fi
 [[ -n "$DB_PASS" ]] || DB_PASS=$(openssl rand -hex 24)
-psql_admin -v pass="$DB_PASS" <<'SQL'
+[[ "$DB_PASS" =~ ^[A-Za-z0-9._-]+$ ]] || { warn "La contraseña de la base de datos de config.php tiene caracteres no admitidos."; exit 1; }
+
+if [[ $RESET_DB -eq 1 ]]; then
+    read -rp "Se BORRARÁN todas las reservas y cuentas. Escribe BORRAR para seguir: " sure
+    [[ "$sure" == "BORRAR" ]] || { warn "Cancelado."; exit 1; }
+    systemctl stop "php${PHP_VER}-fpm" cron 2>/dev/null || true
+    psql_admin -c "DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)"
+fi
+
+# Roles y base de datos. La contraseña va por la entrada estándar (\set), no
+# en la línea de órdenes, donde la vería cualquier usuario con «ps».
+{ printf '\\set pass %s\n' "'$DB_PASS'"; cat <<'SQL'; } | psql_admin
 SELECT 'CREATE ROLE mesalista_owner NOLOGIN' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mesalista_owner') \gexec
 SELECT 'CREATE ROLE mesalista LOGIN' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mesalista') \gexec
 ALTER ROLE mesalista LOGIN PASSWORD :'pass';
-SELECT 'CREATE DATABASE mesalista OWNER mesalista_owner ENCODING ''UTF8'' TEMPLATE template0'
+SELECT 'CREATE DATABASE mesalista OWNER mesalista_owner ENCODING ''UTF8'' LOCALE ''C.UTF-8'' TEMPLATE template0'
  WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'mesalista') \gexec
 SQL
 
-HAS_TABLES=$(sudo -u postgres psql -X -tA -d mesalista -c "SELECT to_regclass('public.reservations') IS NOT NULL")
-if [[ "$HAS_TABLES" == "f" || $RESET_DB -eq 1 ]]; then
-    if [[ $RESET_DB -eq 1 ]]; then
-        read -rp "Se BORRARÁN todas las reservas y cuentas. Escribe BORRAR para seguir: " sure
-        [[ "$sure" == "BORRAR" ]] || { warn "Cancelado."; exit 1; }
-    fi
-    # Como mesalista_owner: así es el dueño de todo (incluidas las extensiones).
-    psql_admin -d mesalista -c 'SET ROLE mesalista_owner' -f "$REPO_DIR/bd/esquema.sql"
-    psql_admin -d mesalista -c 'SET ROLE mesalista_owner' -f "$REPO_DIR/bd/datos.sql"
+HAS_TABLES=$(psql_admin -tA -d "$DB_NAME" -c "SELECT to_regclass('public.reservations') IS NOT NULL")
+if [[ "$HAS_TABLES" != "t" ]]; then
+    psql_owner "$REPO_DIR/bd/esquema.sql" "$REPO_DIR/bd/datos.sql"
     echo "Base de datos creada con el restaurante de pruebas."
 fi
-psql_admin -d mesalista -f "$REPO_DIR/despliegue/permisos.sql"
+psql_admin -d "$DB_NAME" -f - < "$REPO_DIR/despliegue/permisos.sql"
 
 # ---------------------------------------------------------------------------
 # Código de la aplicación
@@ -155,6 +218,7 @@ rsync -a --delete --exclude '/config/config.php' "$REPO_DIR/php/" "$PHP_DIR/"
 rsync -a --delete "$REPO_DIR/publico/" "$API_DIR/"
 install -m 700 "$REPO_DIR/despliegue/backup.sh" "$REPO_DIR/despliegue/restore.sh" "$LIB_DIR/"
 install -m 644 "$REPO_DIR/despliegue/permisos.sql" "$LIB_DIR/"
+# Crea config.php la primera vez; si ya existe, solo cambia el dominio (si se ha cambiado).
 ML_DB_PASS="$DB_PASS" ML_DOMAIN="$DOMAIN" ML_MAIL_CONNECTION="${MAIL_CONNECTION:-}" ML_MAIL_SENDER="${MAIL_SENDER:-}" \
     php "$PHP_DIR/bin/write_config.php"
 chown -R root:www-data "$APP_DIR"
@@ -228,7 +292,7 @@ for svc in apache2 "php${PHP_VER}-fpm" "postgresql@${PG_VER}-main"; do
 done
 systemctl daemon-reload
 systemctl enable apache2 "php${PHP_VER}-fpm" postgresql cron >/dev/null
-systemctl restart "php${PHP_VER}-fpm"
+systemctl restart "php${PHP_VER}-fpm" cron
 
 # ---------------------------------------------------------------------------
 # Apache (RS-01). Mientras no hay certificado de Let's Encrypt arranca con uno
@@ -237,8 +301,9 @@ systemctl restart "php${PHP_VER}-fpm"
 say "Apache"
 LE_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
 LE_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
-SELF_CERT="$ETC_DIR/selfsigned.crt"
-SELF_KEY="$ETC_DIR/selfsigned.key"
+# Uno por dominio: si el dominio cambia, se crea otro con el nombre nuevo.
+SELF_CERT="$ETC_DIR/selfsigned-$DOMAIN.crt"
+SELF_KEY="$ETC_DIR/selfsigned-$DOMAIN.key"
 ACME_DIR=/var/www/letsencrypt
 CERT_OK=0
 [[ -f "$LE_CERT" ]] && CERT_OK=1   # ya existe; certbot lo renueva solo
@@ -251,10 +316,11 @@ render_site() {  # render_site CERT KEY
 if [[ $CERT_OK -eq 0 && ! -f "$SELF_CERT" ]]; then
     openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=$DOMAIN" \
         -addext "subjectAltName=DNS:$DOMAIN" -keyout "$SELF_KEY" -out "$SELF_CERT" 2>/dev/null
+    chmod 600 "$SELF_KEY"
 fi
 mkdir -p "$ACME_DIR/.well-known/acme-challenge"
 
-a2dismod -q mpm_prefork php"${PHP_VER}" 2>/dev/null || true
+a2dismod -q mpm_prefork "php${PHP_VER}" 2>/dev/null || true
 a2enmod -q mpm_event ssl headers proxy_fcgi setenvif http2 deflate >/dev/null
 a2enconf -q "php${PHP_VER}-fpm" >/dev/null
 if [[ $CERT_OK -eq 1 ]]; then render_site "$LE_CERT" "$LE_KEY"; else render_site "$SELF_CERT" "$SELF_KEY"; fi
@@ -275,10 +341,12 @@ ufw allow 80/tcp >/dev/null
 ufw allow 443/tcp >/dev/null
 ufw allow 22/tcp >/dev/null
 # Solo se avisa si SSH acepta contraseñas: con claves no hay fuerza bruta posible.
+# (En Ubuntu 24.04 sshd se activa por socket: «sshd -T» necesita /run/sshd.)
+mkdir -p /run/sshd
 SSH_PASSWORDS=$(sshd -T 2>/dev/null | awk '$1 == "passwordauthentication" || $1 == "kbdinteractiveauthentication" { print $2 }' | sort -u | tr '\n' ' ')
 if [[ "$SSH_PASSWORDS" == "no " ]]; then
     echo "SSH abierto solo con clave (sin contraseñas)."
-else
+elif [[ -n "$SSH_PASSWORDS" ]]; then
     warn "SSH acepta contraseñas: usa claves SSH (PasswordAuthentication no)."
 fi
 ufw --force enable >/dev/null
@@ -339,10 +407,24 @@ EOF
 # ---------------------------------------------------------------------------
 # Cuenta de administrador
 # ---------------------------------------------------------------------------
-ADMINS=$(sudo -u postgres psql -X -tA -d mesalista -c "SELECT COUNT(*) FROM users WHERE role = 'admin'")
+ADMINS=$(psql_admin -tA -d "$DB_NAME" -c "SELECT COUNT(*) FROM users WHERE role = 'admin'")
 if [[ "$ADMINS" == "0" ]]; then
     say "Cuenta de administrador ($ADMIN_EMAIL)"
     php "$PHP_DIR/bin/create_user.php" admin "$ADMIN_EMAIL" "Administrador"
+fi
+
+# ---------------------------------------------------------------------------
+# Comprobación final: la API responde por HTTPS desde la propia máquina.
+# ---------------------------------------------------------------------------
+say "Comprobación"
+CURL_OPTS=(-s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$DOMAIN:443:127.0.0.1")
+[[ $CERT_OK -eq 1 ]] || CURL_OPTS+=(-k)   # solo esta prueba local, con el certificado temporal
+CODIGO=$(curl "${CURL_OPTS[@]}" "https://$DOMAIN/api/v1/config" || true)
+if [[ "$CODIGO" == "200" ]]; then
+    echo "La API responde en https://$DOMAIN/api/v1/config."
+else
+    warn "La API no responde como se esperaba (código ${CODIGO:-sin respuesta})."
+    warn "Revisa /var/log/apache2/mesalista-error.log y /var/log/mesalista/php.log."
 fi
 
 say "Listo"

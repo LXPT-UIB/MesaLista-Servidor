@@ -13,7 +13,7 @@ return [
     ],
 
     // Dominio público del servidor (etiqueta DNS de la IP pública de Azure), sin https://
-    'domain' => 'lapp.spaincentral.cloudapp.azure.com',
+    'domain' => 'mesalista.spaincentral.cloudapp.azure.com',
 
     // Clave para firmar los QR (RS-07). 64 caracteres hexadecimales aleatorios:
     //   php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"
