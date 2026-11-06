@@ -8,7 +8,7 @@ Es una de las tres partes del proyecto:
 |---|---|---|
 | **Servidor** (este repositorio) | Apache, PHP 8.3, PostgreSQL 16 | Ofrece la API en `https://<dominio>/api/v1/` |
 | Web ([MesaLista-web](https://github.com/LXPT-UIB/MesaLista-web)) | HTML, CSS, PHP, JavaScript y Bootstrap | Su PHP llama a la API con un token Bearer |
-| App | Con Firebase | Llama a la API con un token Bearer; recibe avisos push por FCM |
+| App ([MesaLista-Firebase](https://github.com/LXPT-UIB/MesaLista-Firebase)) | Android: Kotlin y Jetpack Compose, con Firebase para los avisos | Llama a la API con un token Bearer; recibe avisos push por FCM |
 
 Todas las reglas del servicio (disponibilidad, plazos, mesas, QR, pagos…) están
 en el servidor: la web y la app solo muestran datos y envían peticiones.
