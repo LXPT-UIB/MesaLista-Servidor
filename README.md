@@ -7,7 +7,7 @@ Es una de las tres partes del proyecto:
 | Parte | Tecnologías | Cómo se conecta |
 |---|---|---|
 | **Servidor** (este repositorio) | Apache, PHP 8.3, PostgreSQL 16 | Ofrece la API en `https://<dominio>/api/v1/` |
-| Web | HTML, CSS, PHP, JavaScript y Bootstrap | Su PHP llama a la API con un token Bearer |
+| Web ([MesaLista-web](https://github.com/LXPT-UIB/MesaLista-web)) | HTML, CSS, PHP, JavaScript y Bootstrap | Su PHP llama a la API con un token Bearer |
 | App | Con Firebase | Llama a la API con un token Bearer; recibe avisos push por FCM |
 
 Todas las reglas del servicio (disponibilidad, plazos, mesas, QR, pagos…) están
@@ -42,7 +42,7 @@ docs/              openapi.yaml e integracion.md
 3. En la máquina:
 
    ```bash
-   git clone <repositorio> ~/MesaLista-Servidor
+   git clone https://github.com/LXPT-UIB/MesaLista-Servidor.git ~/MesaLista-Servidor
    cd ~/MesaLista-Servidor && sudo bash despliegue/install.sh
    ```
 
@@ -69,7 +69,7 @@ Queda así:
 |---|---|
 | API | `https://<dominio>/api/v1/` → `/var/www/mesalista-servidor/publico` |
 | Lógica y `config.php` | `/var/www/mesalista-servidor/php` |
-| Raíz de la web (la instala su proyecto) | `/var/www/mesalista-web`, con sus directivas de Apache en `/etc/apache2/mesalista-web.d/` |
+| Raíz de la web (la instala [MesaLista-web](https://github.com/LXPT-UIB/MesaLista-web)) | `/var/www/mesalista-web`, con sus directivas de Apache en `/etc/apache2/mesalista-web.d/` |
 | Base de datos | PostgreSQL 16 solo en local; dueño `mesalista_owner`, la API entra como `mesalista` (solo lee y escribe datos) |
 | Tareas | `worker.php` cada minuto, `worker.php --diario` a las 04:00 y copia a las 03:30 (`/etc/cron.d/mesalista`) |
 | Copias | `/var/backups/mesalista`, las de los últimos 14 días |
