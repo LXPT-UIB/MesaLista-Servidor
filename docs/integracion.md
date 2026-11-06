@@ -17,7 +17,7 @@ teléfono), pero la última palabra es siempre del servidor.
 
 | Entorno | Dirección base |
 |---|---|
-| Servidor de Azure | `https://lapp.spaincentral.cloudapp.azure.com/api/v1` |
+| Servidor de Azure | `https://mesalista.spaincentral.cloudapp.azure.com/api/v1` |
 | Desarrollo en local | `http://127.0.0.1:8091/api/v1` (ver el README) |
 
 - Todo va en JSON (`Content-Type: application/json`), salvo la descarga del CSV.
@@ -82,7 +82,7 @@ no hace falta CORS.
 // Llamada a la API desde el PHP de la web.
 function api(string $method, string $path, ?array $body = null): array
 {
-    $ch = curl_init('https://lapp.spaincentral.cloudapp.azure.com/api/v1' . $path);
+    $ch = curl_init('https://mesalista.spaincentral.cloudapp.azure.com/api/v1' . $path);
     $headers = ['Accept: application/json', 'X-Forwarded-For: ' . $_SERVER['REMOTE_ADDR']];
     if (!empty($_SESSION['token'])) {
         $headers[] = 'Authorization: Bearer ' . $_SESSION['token'];
@@ -97,7 +97,7 @@ function api(string $method, string $path, ?array $body = null): array
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT        => 15,
         // Misma máquina: se conecta a 127.0.0.1 con el certificado del dominio.
-        CURLOPT_RESOLVE        => ['lapp.spaincentral.cloudapp.azure.com:443:127.0.0.1'],
+        CURLOPT_RESOLVE        => ['mesalista.spaincentral.cloudapp.azure.com:443:127.0.0.1'],
     ]);
     $raw = curl_exec($ch);
     $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);

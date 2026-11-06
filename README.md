@@ -37,7 +37,7 @@ docs/              openapi.yaml e integracion.md
 ## Instalación en Azure
 
 1. Máquina virtual con **Ubuntu Server 24.04 LTS**, IP pública estática y una
-   **etiqueta DNS** (p. ej. `lapp.spaincentral.cloudapp.azure.com`).
+   **etiqueta DNS** (p. ej. `mesalista.spaincentral.cloudapp.azure.com`).
 2. Grupo de seguridad de red: **80 y 443** abiertos a todos; **22** solo desde tu IP.
 3. En la máquina:
 
@@ -49,6 +49,12 @@ docs/              openapi.yaml e integracion.md
    Pide el dominio, un correo para Let's Encrypt, el correo del administrador y
    (la primera vez) la cadena de conexión y el remitente de Azure Communication
    Services; se pueden dejar en blanco. Al final, la contraseña del administrador.
+   El dominio también se puede dar de antemano:
+   `sudo bash despliegue/install.sh --dominio mesalista.spaincentral.cloudapp.azure.com`.
+
+   El repositorio puede estar en la carpeta personal: en Ubuntu 24.04 tiene
+   permisos 750 y el usuario `postgres` no puede entrar, así que el script le
+   pasa los `.sql` por la entrada estándar en lugar de por su ruta.
 4. Opcional, cuando se tengan las claves:
 
    ```bash
@@ -72,6 +78,19 @@ Queda así:
 **Actualizar:** `git pull` y volver a ejecutar `sudo bash despliegue/install.sh`
 (no borra datos y conserva `config.php`). Para empezar de cero:
 `sudo bash despliegue/install.sh --reset-db` (pide escribir `BORRAR`).
+
+**Cambiar de dominio:** poner la nueva etiqueta DNS en Azure y ejecutar
+`sudo bash despliegue/install.sh --dominio <nuevo>`. Cambia `domain` y las
+direcciones de la web en `config.php` (el resto se conserva), rehace el sitio de
+Apache y pide el certificado para el nuevo nombre.
+
+**Si falla PostgreSQL durante la instalación:**
+
+| Síntoma | Qué mirar |
+|---|---|
+| `could not change directory` o `Permission denied` al cargar el esquema | El script trabaja desde `/` y pasa los archivos por la entrada estándar. A mano: `sudo -u postgres psql -d mesalista -f - < bd/esquema.sql`. |
+| `PostgreSQL no arranca` | `pg_lsclusters` y `journalctl -u postgresql@16-main`. Si falta el clúster `16/main`, el script lo crea. |
+| Esquema a medias tras un error | `esquema.sql` y `datos.sql` se cargan en una sola transacción: si algo falla no queda nada, y basta con volver a ejecutar el script. |
 
 **Si en la máquina estaba MesaLista-Definitiva** (con MariaDB), el sitio de Apache
 y las tareas de cron de este servidor la sustituyen. Sus archivos

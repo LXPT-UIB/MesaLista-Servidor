@@ -16,16 +16,19 @@ DEST=/var/backups/mesalista
 KEEP_DAYS=14
 STAMP=$(date +%F-%H%M)
 
+[[ $EUID -eq 0 ]] || { echo "Ejecuta con sudo." >&2; exit 1; }
+cd /   # postgres no puede entrar en las carpetas personales
 umask 077
 mkdir -p "$DEST"
 chmod 700 "$DEST"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
-chmod 755 "$WORK"   # postgres escribe aquí el volcado
 
-# Copia coherente sin parar el servicio (una sola transacción).
-sudo -u postgres pg_dump --format=custom --file="$WORK/mesalista.dump" mesalista
+# Copia coherente sin parar el servicio (una sola transacción). pg_dump, como
+# postgres, escribe en su salida y root la guarda: postgres no necesita
+# permisos en la carpeta de trabajo.
+sudo -u postgres pg_dump --format=custom mesalista > "$WORK/mesalista.dump"
 cp "$CONFIG" "$WORK/config.php"
 tar -czf "$DEST/mesalista-${STAMP}.tar.gz.tmp" -C "$WORK" mesalista.dump config.php
 mv "$DEST/mesalista-${STAMP}.tar.gz.tmp" "$DEST/mesalista-${STAMP}.tar.gz"
